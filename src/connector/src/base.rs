@@ -81,7 +81,7 @@ pub enum SplitEnumeratorImpl {
     Pulsar(pulsar::enumerator::PulsarSplitEnumerator),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum SplitImpl {
     Kafka(kafka::KafkaSplit),
     Pulsar(pulsar::PulsarSplit),
