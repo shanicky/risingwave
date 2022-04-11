@@ -18,11 +18,10 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::future::Future;
 use std::ops::RangeBounds;
-use std::sync::{atomic, Arc};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use itertools::Itertools;
-use tokio::task::yield_now;
 
 mod block_cache;
 pub use block_cache::*;
@@ -67,7 +66,6 @@ use super::monitor::StateStoreMetrics;
 use crate::hummock::hummock_meta_client::HummockMetaClient;
 use crate::hummock::iterator::ReverseUserIterator;
 use crate::hummock::local_version_manager::LocalVersionManager;
-use crate::hummock::shared_buffer::shared_buffer_flusher::SharedBufferFlusher;
 use crate::hummock::shared_buffer::shared_buffer_manager::SharedBufferManager;
 use crate::hummock::utils::validate_epoch;
 use crate::hummock::version_cmp::VersionedComparator;
@@ -138,10 +136,6 @@ impl HummockStorage {
             stats.clone(),
             hummock_meta_client.clone(),
         ));
-
-        let shared_buffer_flusher =
-            SharedBufferFlusher::new(stats.clone(), Arc::downgrade(&shared_buffer_manager));
-        tokio::spawn(shared_buffer_flusher.run());
 
         LocalVersionManager::start_workers(
             local_version_manager.clone(),
@@ -367,19 +361,6 @@ impl StateStore for HummockStorage {
         epoch: u64,
     ) -> Self::IngestBatchFuture<'_> {
         async move {
-            let mut shared_buff_cur_size = self
-                .stats
-                .shared_buffer_cur_size
-                .load(atomic::Ordering::SeqCst);
-            // yield current task if threshold has been reached
-            while self.stats.shared_buffer_threshold_size <= shared_buff_cur_size {
-                yield_now().await;
-                shared_buff_cur_size = self
-                    .stats
-                    .shared_buffer_cur_size
-                    .load(atomic::Ordering::SeqCst);
-            }
-
             let batch = kv_pairs
                 .into_iter()
                 .map(|(key, value)| {
@@ -390,11 +371,7 @@ impl StateStore for HummockStorage {
                 })
                 .collect_vec();
 
-            let batch_size = self.shared_buffer_manager.write_batch(batch, epoch)?;
-            self.stats
-                .shared_buffer_cur_size
-                .fetch_add(batch_size as _, atomic::Ordering::SeqCst);
-            log::debug!("ingested batch size: {}", batch_size);
+            let batch_size = self.shared_buffer_manager.write_batch(batch, epoch).await?;
 
             if !self.options.async_checkpoint_enabled {
                 self.shared_buffer_manager.sync(Some(epoch)).await?;
